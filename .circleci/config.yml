@@ -1,0 +1,156 @@
+version: 2.1
+orbs:
+    aws-eks: circleci/aws-eks@1.0.3
+    kubernetes: circleci/kubernetes@0.11.2
+commands:
+    install_awscli:
+      description: Install AWS CLI v2
+      steps:
+        - run:
+            name: Install AWS CLI v2
+            command: |
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+              ./aws/install 
+    install_nodejs:
+      description: Install Node.js 13
+      steps:
+        - run:
+            name: Install Node.js 13
+            command: |
+              curl -fsSL https://deb.nodesource.com/setup_13.x | sudo -E bash -
+              apt install -y nodejs
+    install_aws_eks:
+      description: Install eksctl binaries
+      steps:
+        - run:
+            name: Install eksctl binaries
+            command: |
+              mkdir -p tmp
+              curl --silent --location --retry 5 "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C tmp
+              chmod +x tmp/eksctl
+              SUDO=""
+              if [ $(id -u) -ne 0 ] && which sudo > /dev/null ; then
+                  SUDO="sudo"
+              fi
+                  $SUDO mv tmp/eksctl /usr/local/bin/
+                  rmdir tmp
+    install_kubectl:
+      description:
+      steps:
+        - run:
+            name: Install kubectl
+            command: |
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+              install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+              kubectl version --client
+jobs:
+  pre_build:
+    docker:
+      - image: python:3.7.3-stretch
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "requirements.txt" }}
+            - v1-dependencies-
+      - run:
+          name: install dependencies
+          command: |
+            python3 -m venv venv
+            . venv/bin/activate
+            make install
+            wget -O /bin/hadolint https://github.com/hadolint/hadolint/releases/download/v1.16.3/hadolint-Linux-x86_64 &&\
+            chmod +x /bin/hadolint
+      - run:
+           name: run lint
+           command: |
+             . venv/bin/activate
+               make lint
+      - save_cache:
+            paths:
+              - ./venv
+            key: v1-dependencies-{{ checksum "requirements.txt" }}
+  build-image:
+    docker:
+      - image: circleci/golang:1.15
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.14
+      - run:
+          name: Build docker image
+          command: |
+            docker build --tag=capfinal .
+            sleep 30s
+            docker images ls
+            docker login -u="$DOCKER_USER" -p="$DOCKER_PASSWORD" docker.io
+            docker tag capfinal purva505/capfinal:v1
+            docker push purva505/capfinal:v1
+  eks-cluster-creation:
+    docker: 
+      - image: python:3.7-alpine3.11
+    steps:
+      - checkout
+      - run:
+          name: Install tar and gzip
+          command: |
+            apk add --update tar gzip nodejs npm curl  
+      - install_awscli
+      - install_aws_eks
+      - install_kubectl
+      - run:
+          name: AWS EKS cluster creation
+          command: |
+            eksctl create cluster --name capfinal --region us-east-1 --zones us-east-1a,us-east-1b,us-east-1c,us-east-1d
+            eksctl utils describe-stacks --region us-east-1 --cluster=capfinal
+            eksctl get cluster --name=capfinal --region=us-east-1
+
+  deploy-phase:
+    executor: aws-eks/python3
+    parameters:
+      cluster-name:
+        description: |
+          capfinal
+        type: string
+    steps:
+      - checkout
+      - kubernetes/install
+      - aws-eks/update-kubeconfig-with-authenticator:
+          cluster-name: << parameters.cluster-name >>
+          install-kubectl: true
+      - kubernetes/create-or-update-resource:
+          get-rollout-status: true
+          resource-file-path: deployment.yml
+          resource-name: deployment/capfinal
+  sanity:
+    executor: aws-eks/python3
+    parameters: 
+      cluster-name:
+        description: |
+          capfinal
+        type: string
+    steps:
+      - kubernetes/install
+      - aws-eks/update-kubeconfig-with-authenticator:
+          cluster-name: << parameters.cluster-name >>
+      - run:
+          name: Check Cluster status
+          command: |
+            kubectl get nodes -o wide
+            sleep 30s
+            kubectl get all
+workflows:
+  default:
+      jobs:
+        - pre_build
+        #- build-image:
+        #    requires: [pre_build]
+        #- eks-cluster-creation:
+        #   requires: [build-image]
+        #- deploy-phase:
+        #    cluster-name: capfinal
+        #    requires: [eks-cluster-creation]
+        #- sanity:
+        #    cluster-name: capfinal
+        #    requires: [deploy-phase]

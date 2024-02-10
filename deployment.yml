@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capfinal
+  labels:
+    app: capfinal
+  namespace: default
+spec:
+  replicas: 2
+  progressDeadlineSeconds: 3600
+  selector:
+    matchLabels:
+      app: capfinal
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+         app: capfinal
+    spec:
+      containers:
+        - image: purva505/capfinal:v1
+          imagePullPolicy: Always
+          name: myimage
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: capfinal
+  labels:
+    app: capfinal
+spec:
+  type: LoadBalancer
+  selector:
+    app: capfinal
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
